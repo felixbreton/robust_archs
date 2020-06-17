@@ -1,0 +1,11 @@
+#use GPU if available (True or False)
+True
+
+#image size
+32
+
+#dataset (CIFAR or SC)
+CIFAR
+
+#batch size
+64
