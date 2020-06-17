@@ -7,38 +7,51 @@ import torch.optim as optim
 
 import matplotlib.pyplot as plt
 import numpy as np
-from data import SQUARE_CIRCLE,MNIST,CIFAR10,IMGNET12
-from segmentation import seg_quant,seg_kMeans_2d
+#import foolbox as fb
+from data import *
+from segmentation import *
 from models import *
 from time import *
+import sys
 
-#torch.set_default_tensor_type('torch.cuda.FloatTensor')
-device=torch.device("cpu")
-if torch.cuda.is_available():
+parFile=open("params.txt")
+params=list(filter(lambda s: len(s)>0 and s[0]!='#',parFile.read().splitlines()))
+
+if params[0].lower()=='true' and torch.cuda.is_available():
     device = torch.device("cuda:0")
+    workers=8
     print("Running on the GPU")
 else:
     device = torch.device("cpu")
+    workers=0
     print("Running on the CPU")
 
-size=32
+size=int(params[1])
 sfn=size//4-3
-chans=3
-#Remember to update models.py when changing the size
+chans=nChans(params[2])
+batchSize=int(params[3])
 
-transform = transforms.Compose(
-    [transforms.ToTensor(),
-     transforms.Normalize((0.5,0.5,0.5),(0.5,0.5,0.5))])
+t0=time()
 
-classes = ('plane', 'car', 'bird', 'cat', 'deer',
-            'dog', 'frog', 'horse', 'ship', 'truck')
+if params[2]=="CIFAR":
+    nClasses=10
+    classes = ('plane', 'car', 'bird', 'cat', 'deer',
+                'dog', 'frog', 'horse', 'ship', 'truck')
+    #tr_loader, va_loader, te_loader = CIFAR10(
+    #        bs=batchSize, valid_size=.1,
+    #        size=size, normalize=True,num_workers=workers)
+    tr_loader,va_loader,te_loader=FROM_FILE('slic512_',bs=batchSize)
+elif params[2]=="SC":
+    nClasses=2
+    classes = ('square', 'circle')
+    tr_loader, va_loader, te_loader = SQUARE_CIRCLE(
+            bs=batchSize, valid_size=.1,
+            size=size, normalize=False)
+else:
+    print("Dataset "+params[2]+" unknown")
+    sys.exit(0)
 
-load=True
-if load==True:
-    tr_loader, va_loader, te_loader = CIFAR10(
-            bs=4, valid_size=.1,
-            size=size, normalize=True)
-    trainloader = tr_loader
+print("Initial loading time : "+str(time()-t0))
 
 def imshow(img):
     img = img / 2 + 0.5     # unnormalize
@@ -47,7 +60,7 @@ def imshow(img):
     plt.show()
 
 def dispGrid_(images):
-    imshow(torchvision.utils.make_grid(images.reshape(4,chans,size,size)))
+    imshow(torchvision.utils.make_grid(images.reshape(batchSize,chans,size,size)))
 
 def reshape(img):
     return torch.flatten(img)
@@ -56,7 +69,7 @@ def test(net,images,labels):
     # show images
     dispGrid_(images)
     #print labels
-    print(' '.join('%5s' % classes[labels[j].item()] for j in range(4)))
+    print(' '.join('%5s' % classes[labels[j].item()] for j in range(batchSize)))
 
     #images=torch.stack([reshape(im) for im in images])
     out=net.forward(images)
@@ -64,32 +77,48 @@ def test(net,images,labels):
     vals,reps=torch.max(out,1)
     print([classes[i] for i in reps],vals.exp()/tots)
 
-def train(epochs,verbose=True,path=""):
+def load_net(path):
+    net=NetCCFC(nClasses).to(device)
+    net.load_state_dict(torch.load(path,map_location=device))
+    net.eval()
+    return net
+
+def valid(net):
+    acTot=0
+    va_len=0
+    for i,data in enumerate(va_loader):
+        print(i)
+        images,labels=data
+        images=images.to(device)
+        labels=labels.to(device)
+
+        out=net.forward(images)
+        reps=out.argmax(1)
+        acTot+=(labels==reps).sum().item()
+        va_len+=len(images)
+    return acTot/va_len
+
+
+def train(epochs,verbose=True,path="",lr=0.00003):
+    print("Starting training")
     global device
     if path=="":
-        net=NetCCFC().to(device)
+        net=NetCCFC(nClasses).to(device)
     else:
-        net=NetCCFC()
-        net.load_state_dict(torch.load(path))
-        net.eval()
+        net=load_net(path)
 
-    criterion=nn.CrossEntropyLoss()
-    optimizer=optim.SGD(net.parameters(), lr=0.0001, momentum=0.9)
-    #optimizer=optim.Adam(net.parameters(),lr=0.0003)
+    criterion=nn.CrossEntropyLoss(reduction='sum')
+    optimizer=optim.SGD(net.parameters(), lr=lr, momentum=0.9)
 
-    dataiter = iter(trainloader)
     cuml=0
     accAvg=0
     deb=time()
-    tload=0
     ttrain=0
     for e in range(epochs):
-        for i,data in enumerate(trainloader):
-            dload=time()
+        for i,data in enumerate(tr_loader):
             images,labels=data
             images=images.to(device)
             labels=labels.to(device)
-            tload+=time()-dload
 
             dtrain=time()
             out=net.forward(images)
@@ -104,66 +133,39 @@ def train(epochs,verbose=True,path=""):
 
             cuml+=loss
             accAvg+=acc
-            if i%1000==0:
-                print(i,loss,cuml/1000,accAvg/1000)
+            if i%100==0:
+                print(i,cuml/100,accAvg/100)
                 cuml=0
                 accAvg=0
-        torch.save(net.state_dict(),"./net/"+str(e)+".pt")
+        if e%10==0 or e==epochs-1:
+            torch.save(net.state_dict(),"./net/"+str(e)+".pt")
+            print(valid(net))
         if verbose:
-            print("Epoch : "+str(e)+"Time : "+str(round(time()-deb,2)))
-            print("Time spent loading : "+str(round(tload,2)))
+            print("Epoch : "+str(e)+" Time : "+str(round(time()-deb,2)))
             print("Time spent training : "+str(round(ttrain,2)))
 
-train(2)
+def eval_adv(net,attack,eps,seg):
+    acTot=0
+    lossTot=0
+    criterion=nn.CrossEntropyLoss()
+    for i,(images,labels) in enumerate(te_loader):
+        if i==1:
+            break
+        print(i)
+        images=images.to(device)
+        labels=labels.to(device)
+        if attack!="":
+            images=FGSM(net,images,labels,10)
+        if seg=="SLIC":
+            images=images.cpu()
+            images=batchSeg(images,8,seg_kMeans_2d)
+            images=images.to(device)
 
-"""images,labels=dataiter.next()
-images=images.to(device)
-labels=labels.to(device)
-test(net,images,labels)"""
-
-def oracle(image):
-    parts={}
-    ret=[]
-    for i in image.flatten():
-        val=i.item()
-        if not val in parts:
-            parts[val]=len(parts)
-        ret.append(parts[val])
-    return torch.tensor(ret).view(*image.shape)
-
-def batchH(base,a):
-    tab=[avg(a[i],oracle(base[i])) for i in range(len(base))]
-    return torch.stack(tab)
-
-def adv():
-    images,labels=dataiter.next()
-    #images=torch.stack([reshape(im) for im in images])
-    images.requires_grad_(True)
-
-    out=net.forward(images)
-    loss=criterion(out,(labels+5)%10)
-
-    loss.backward(retain_graph=True)
-    optimizer.zero_grad()
-
-def mk_adv(net,images,labels):
-    out=net.forward(images)
-    loss=criterion(out,(labels+5)%10)
-
-    loss.backward(retain_graph=True)
-    optimizer.zero_grad()
-
-    return (images-5000*images.grad.clamp(-0.000001,0.000001)).clamp(-1,1).detach().requires_grad_(True)
-
-def mk_adv_oracle(net,images,labels):
-    out=net.forward(images)
-    loss=criterion(out,(labels+1)%2)
-
-    loss.backward(retain_graph=True)
-    optimizer.zero_grad()
-
-    grad=batchH(images,images.grad)
-    return (images-5000*grad.clamp(-0.000001,0.000001)).clamp(-1,1).detach().requires_grad_(True)
+        out=net.forward(images)
+        reps=out.argmax(1)
+        acTot+=(labels==reps).sum().item()
+        lossTot+=criterion(out,labels)
+    return (acTot/batchSize,lossTot*batchSize/len(te_loader.dataset))
 
 def ev_grad():
     images.requires_grad_(True)
@@ -176,10 +178,43 @@ def ev_grad():
         print(images.grad[i].norm())
     optimizer.zero_grad()
 
-def segment_deb(images,n):
-    ref=quant(images,n)
-    return batchH(ref,images)
+#train(200,path="")
 
-def batchSeg(images,n,seg):
-    tab=[avg_seg(images[i],seg(images[i],n,01.5)) for i in range(len(images))]
-    return torch.stack(tab)
+"""net=load_net("./CIFARseg512.pt")
+print(valid(net))
+images,labels=iter(va_loader).next()
+images=images.to(device)
+labels=labels.to(device)
+dispGrid_(images)"""
+"""
+#print(vuln(0.1,net))
+def vuln(eps,net,attack):
+    images,labels=iter(va_loader).next()
+    images=images.to(device)
+    labels=labels.to(device)
+    succTot=0
+    n=0
+
+    for i in range(len(images)):
+        print(i)
+        fmodel = fb.PyTorchModel(net, bounds=(-1, 1))
+        _, advs, success = attack(fmodel, images[None,i], labels[None,i], epsilons=[eps])
+        succTot+=success.sum().item()
+        n+=1
+    return succTot/n
+
+#print(vuln(500,net,fb.attacks.BoundaryAttack(steps=20)))"""
+deb=time()
+net=seg_NetCCFC(nClasses).to(device)
+for i in range(1):
+    print(i)
+    images,labels=iter(va_loader).next()
+    images=images.to(device)
+    labels=labels.to(device)
+
+    for j in range(len(images)):
+        """segs=seg_SLIC(images[j],64)
+        avg_seg(images[j],segs)"""
+        net.forward(images[j:j+1])
+        #img2fc(images[j],64)
+print(time()-deb)
