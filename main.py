@@ -7,7 +7,7 @@ import torch.optim as optim
 
 import matplotlib.pyplot as plt
 import numpy as np
-#import foolbox as fb
+import foolbox as fb
 from data import *
 from segmentation import *
 from models import *
@@ -40,7 +40,7 @@ if params[2]=="CIFAR":
     #tr_loader, va_loader, te_loader = CIFAR10(
     #        bs=batchSize, valid_size=.1,
     #        size=size, normalize=True,num_workers=workers)
-    tr_loader,va_loader,te_loader=FROM_FILE('slic512_',bs=batchSize)
+    tr_loader,va_loader,te_loader=FROM_FILE('slic448_',bs=batchSize)
 elif params[2]=="SC":
     nClasses=2
     classes = ('square', 'circle')
@@ -180,13 +180,53 @@ def ev_grad():
 
 #train(200,path="")
 
-"""net=load_net("./CIFARseg512.pt")
+net=load_net("./CIFARnoseg.pt")
+#print(valid(net))
+"""
+net=fseg_NetCCFC(nClasses).to(device)
+net.load_state_dict(torch.load("./CIFARseg512.pt",map_location=device))
+net.eval()
+
+images,labels=iter(va_loader).next()
+images=images.to(device)
+labels=labels.to(device)
+
+img=images[0]
+
+net.fcAvg=img2fc(img,256)
+"""
+def vuln_fixedSeg(eps,net,attack):
+    images,labels=iter(va_loader).next()
+    images=images.to(device)
+    labels=labels.to(device)
+    succTot=0
+    n=0
+    net=fseg_NetCCFC(nClasses).to(device)
+    net.load_state_dict(torch.load("./CIFARseg448.pt",map_location=device))
+    net.eval()
+
+    for i in range(len(images)):
+        print(i)
+        net.fcAvg=img2fc(images[i],448)
+        #net.nSegs=64
+        fmodel = fb.PyTorchModel(net, bounds=(-1, 1))
+        _, advs, success = attack(fmodel, images[None,i], labels[None,i], epsilons=[eps])
+        succTot+=success.sum().item()
+        n+=1
+    return succTot/n
+
+deb=time()
+print(vuln_fixedSeg(0.5,net,fb.attacks.L2PGD()))
+print(time()-deb)
+
+"""objectif : >0.78
+net=load_net("./CIFARseg512.pt")
 print(valid(net))
 images,labels=iter(va_loader).next()
 images=images.to(device)
 labels=labels.to(device)
-dispGrid_(images)"""
-"""
+dispGrid_(images)
+
 #print(vuln(0.1,net))
 def vuln(eps,net,attack):
     images,labels=iter(va_loader).next()
@@ -204,7 +244,7 @@ def vuln(eps,net,attack):
     return succTot/n
 
 #print(vuln(500,net,fb.attacks.BoundaryAttack(steps=20)))"""
-deb=time()
+"""deb=time()
 net=seg_NetCCFC(nClasses).to(device)
 for i in range(1):
     print(i)
@@ -213,8 +253,8 @@ for i in range(1):
     labels=labels.to(device)
 
     for j in range(len(images)):
-        """segs=seg_SLIC(images[j],64)
-        avg_seg(images[j],segs)"""
+        segs=seg_SLIC(images[j],64)
+        avg_seg(images[j],segs)
         net.forward(images[j:j+1])
         #img2fc(images[j],64)
-print(time()-deb)
+print(time()-deb)"""

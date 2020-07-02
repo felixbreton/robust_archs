@@ -52,3 +52,14 @@ def seg_rect(image,n):
         for j in range(size):
             rep[i][j]=i//sqSize+j//sqSize*int(sqrt(n))
     return rep
+
+def nSegsAvg(loader,n):#The slic function often produces fewer segments than the number given as parameter. This function computes the average number of segments for a given value of n
+    tot=0
+    nImages=0
+    for i in range(10):
+        images,labels=iter(loader).next()
+        for img in images:
+            tot+=len(set(seg_SLIC(img,n).flatten()))
+            nImages+=1
+    return tot/nImages
+    
