@@ -13,6 +13,25 @@ from segmentation import *
 from models import *
 from time import *
 import sys
+import argparse
+
+parser=argparse.ArgumentParser()
+parser.add_argument('--nsegs',type=int)
+parser.add_argument('--eps',type=float)
+parser.add_argument('--attack',type=str)
+args=parser.parse_args()
+nsegs=args.nsegs
+eps=args.eps
+attack=args.attack
+if nsegs==None:
+    nsegs=64
+if eps==None:
+    eps=0.1
+if attack==None:
+    attack="L2PGD"
+#parameters that (currently) must be hardcoded :
+#number of tests
+#whether to attack the segmenter
 
 parFile=open("params.txt")
 params=list(filter(lambda s: len(s)>0 and s[0]!='#',parFile.read().splitlines()))
@@ -37,10 +56,10 @@ if params[2]=="CIFAR":
     nClasses=10
     classes = ('plane', 'car', 'bird', 'cat', 'deer',
                 'dog', 'frog', 'horse', 'ship', 'truck')
-    #tr_loader, va_loader, te_loader = CIFAR10(
-    #        bs=batchSize, valid_size=.1,
-    #        size=size, normalize=True,num_workers=workers)
-    tr_loader,va_loader,te_loader=FROM_FILE('slic448_',bs=batchSize)
+    tr_loader, va_loader, te_loader = CIFAR10(
+            bs=batchSize, valid_size=.1,
+            size=size, normalize=True,num_workers=workers)
+    #tr_loader,va_loader,te_loader=FROM_FILE('slic64_',bs=batchSize)
 elif params[2]=="SC":
     nClasses=2
     classes = ('square', 'circle')
@@ -195,31 +214,35 @@ img=images[0]
 
 net.fcAvg=img2fc(img,256)
 """
-def vuln_fixedSeg(eps,net,attack):
+g=[]
+def vuln_fixedSeg(eps,net,attack,nsegs):
     images,labels=iter(va_loader).next()
     images=images.to(device)
     labels=labels.to(device)
     succTot=0
     n=0
     net=fseg_NetCCFC(nClasses).to(device)
-    net.load_state_dict(torch.load("./CIFARseg448.pt",map_location=device))
+    net.load_state_dict(torch.load("./CIFARseg"+str(nsegs)+".pt",map_location=device))
     net.eval()
 
     for i in range(len(images)):
         print(i)
-        net.fcAvg=img2fc(images[i],448)
-        #net.nSegs=64
+        net.fcAvg=img2fc(images[i],nsegs)
+        #net.nSegs=nsegs
         fmodel = fb.PyTorchModel(net, bounds=(-1, 1))
         _, advs, success = attack(fmodel, images[None,i], labels[None,i], epsilons=[eps])
         succTot+=success.sum().item()
         n+=1
+        global g
+        g+=advs[0]
     return succTot/n
 
 deb=time()
-print(vuln_fixedSeg(0.5,net,fb.attacks.L2PGD()))
+print(vuln_fixedSeg(eps,net,getattr(fb.attacks,attack)(),nsegs))
 print(time()-deb)
+torch.save(torch.stack(g),"advs.pt")
 
-"""objectif : >0.78
+"""
 net=load_net("./CIFARseg512.pt")
 print(valid(net))
 images,labels=iter(va_loader).next()
@@ -242,19 +265,4 @@ def vuln(eps,net,attack):
         succTot+=success.sum().item()
         n+=1
     return succTot/n
-
-#print(vuln(500,net,fb.attacks.BoundaryAttack(steps=20)))"""
-"""deb=time()
-net=seg_NetCCFC(nClasses).to(device)
-for i in range(1):
-    print(i)
-    images,labels=iter(va_loader).next()
-    images=images.to(device)
-    labels=labels.to(device)
-
-    for j in range(len(images)):
-        segs=seg_SLIC(images[j],64)
-        avg_seg(images[j],segs)
-        net.forward(images[j:j+1])
-        #img2fc(images[j],64)
-print(time()-deb)"""
+"""
