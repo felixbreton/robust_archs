@@ -1,4 +1,5 @@
-from time import *
+from time import time
+from shutil import copyfile
 import sys
 import argparse
 
@@ -34,6 +35,7 @@ if attack == None:
 #number of tests
 #whether to attack the segmenter
 nEpochs = 200
+fixedSeg=True
 
 parFile=open("params.txt")
 params=list(filter(lambda s: len(s)>0 and s[0]!='#', parFile.read().splitlines()))
@@ -168,70 +170,126 @@ def train(epochs, verbose=True, path="", lr=0.00003):
             print("Epoch : "+str(e)+" Time : "+str(round(time()-start, 2)))
             print("Time spent training : "+str(round(ttrain, 2)))
 
+def train_PGD(epochs, eps, verbose=True, path="", lr=0.00003):
+    print("Starting training")
+    global device
+    if path == "":
+        net = NetCCFC(nClasses).to(device)
+    else:
+        net = load_net(path)
+
+    criterion = nn.CrossEntropyLoss(reduction='sum')
+    optimizer = optim.SGD(net.parameters(), lr=lr, momentum=0.9)
+    PGD = fb.attacks.L2PGD()
+
+    cuml = 0
+    accAvg = 0
+    start = time()
+    ttrain = 0
+    for e in range(epochs):
+        for i, data in enumerate(tr_loader):
+            images, labels = data
+            images = images.to(device)
+            labels = labels.to(device)
+            dtrain = time()
+            net.eval()
+            fmodel = fb.PyTorchModel(net, bounds=(-1, 1))
+            _, advs, _ = PGD(fmodel, images, labels, epsilons=[eps])
+            net.train()
+
+
+            out = net.forward(advs[0])
+            loss = criterion(out, labels)
+            reps = out.argmax(1)
+            acc = ((labels == reps).sum()).float()/len(images)
+
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+            ttrain += time()-dtrain
+
+            cuml += loss
+            accAvg += acc
+            if i%100 == 0:
+                print(i, cuml/100, accAvg/100,ttrain)
+                cuml = 0
+                accAvg = 0
+        if e%10 == 0:
+            torch.save(net.state_dict(), "./net/"+str(e)+".pt")
+            print(valid(net))
+        if e == epochs-1:
+            torch.save(net.state_dict(), "./net/last.pt")
+            print(valid(net))
+        if verbose:
+            print("Epoch : "+str(e)+" Time : "+str(round(time()-start, 2)))
+            print("Time spent training : "+str(round(ttrain, 2)))
+
 def vuln_seg(eps, path, attack, nsegs, fixedSeg):
-    images, labels = iter(va_loader).next()
-    images = images.to(device)
-    labels = labels.to(device)
     succTot = 0
     n = 0
     advExamples = []
-    
-    if fixedSeg:
-        net = fseg_NetCCFC(nClasses).to(device)
-    else:
-        net = seg_NetCCFC(nClasses).to(device)
-    net.load_state_dict(torch.load(path, map_location=device))
-    net.eval()
+    for batch in range(1):
+        print(batch)
+        images, labels = iter(te_loader).next()
+        images = images.to(device)
+        labels = labels.to(device)
 
-    for i in range(len(images)):
-        print(i)
         if fixedSeg:
-            net.fcAvg = img2fc(images[i], nsegs)
+            net = fseg_NetCCFC(nClasses).to(device)
         else:
-            net.nSegs = nsegs
+            net = seg_NetCCFC(nClasses).to(device)
+        net.load_state_dict(torch.load(path, map_location=device))
+        net.eval()
+
+        for i in range(len(images)):
+            #print(i)
+            if fixedSeg:
+                net.fcAvg = img2fc(images[i], nsegs)
+            else:
+                net.nSegs = nsegs
+            fmodel = fb.PyTorchModel(net, bounds=(-1, 1))
+            _, advs, success = attack(fmodel, images[None, i], labels[None, i], epsilons=[eps])
+            succTot += success.sum().item()
+            n += 1
+            advExamples += advs[0]
+        torch.save(torch.stack(advExamples), "advs.pt")
+    return succTot/n
+
+def vuln(eps, path, attack):
+    succTot = 0
+    n = 0
+    advExamples = []
+    for batch in range(10):
+        print(batch)
+        images, labels = iter(te_loader).next()
+        images = images.to(device)
+        labels = labels.to(device)
+
+        net = NetCCFC(nClasses).to(device)
+        net.load_state_dict(torch.load(path, map_location=device))
+        net.eval()
+
         fmodel = fb.PyTorchModel(net, bounds=(-1, 1))
-        _, advs, success = attack(fmodel, images[None, i], labels[None, i], epsilons=[eps])
+        _, advs, success = attack(fmodel, images, labels, epsilons=[eps])
         succTot += success.sum().item()
-        n += 1
+        n += len(images)
         advExamples += advs[0]
         torch.save(torch.stack(advExamples), "advs.pt")
     return succTot/n
 
-modelPath = params[2]+str(nsegs)+".pt"
+train_PGD(200,0.1)
+
+""""modelPath = params[2]+str(nsegs)+".pt"
 
 try:
     net = load_net(modelPath)
 except:
     print("Model '"+modelPath+"' not found, starting training.")
     train(nEpochs, path="")
-    #cp ./net/last.pt modelPath
+    copyfile("./net/last.pt",modelPath)
     net = load_net(modelPath)
 
 start = time()
-print(vuln_seg(eps, modelPath, getattr(fb.attacks, attack)(), nsegs, True))
+print(1-vuln_seg(eps, modelPath, getattr(fb.attacks, attack)(), nsegs, fixedSeg))
 print(time()-start)
-
-"""
-net=load_net("./CIFARseg512.pt")
-print(valid(net))
-images,labels=iter(va_loader).next()
-images=images.to(device)
-labels=labels.to(device)
-dispGrid_(images)
-
-#print(vuln(0.1,net))
-def vuln(eps,net,attack):
-    images,labels=iter(va_loader).next()
-    images=images.to(device)
-    labels=labels.to(device)
-    succTot=0
-    n=0
-
-    for i in range(len(images)):
-        print(i)
-        fmodel = fb.PyTorchModel(net, bounds=(-1, 1))
-        _, advs, success = attack(fmodel, images[None,i], labels[None,i], epsilons=[eps])
-        succTot+=success.sum().item()
-        n+=1
-    return succTot/n
 """
